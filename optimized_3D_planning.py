@@ -4,6 +4,7 @@ import scipy.optimize
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as colors
+from mpl_toolkits.mplot3d import Axes3D
 
 def find_Q(deriv, poly_deg, n_legs):
     """
@@ -89,23 +90,26 @@ def find_A_cont(deriv, poly_deg, n_legs, leg):
     return A_row, b_row
 
 def compute_trajectory(p, T_opt):
+    p = np.asarray(p, dtype=float).flatten()
+    T_opt = np.asarray(T_opt, dtype=float).flatten()
     S = np.hstack([0, np.cumsum(T_opt)])
     t = []
     x = []
     for i in range(len(T_opt)):
-        beta = np.linspace(0, 1)
+        beta = np.linspace(0, 1, dtype=float)
         ti = T_opt[i]*beta + S[i]
-        xi = np.polyval(np.flip(p[i*6:(i+1)*6]), beta)
+        coeff = np.asarray(np.flip(p[i*6:(i+1)*6]), dtype=float)
+        xi = np.polyval(coeff, beta)
         t.append(ti)
         x.append(xi)
-    x = np.hstack(x)
-    t = np.hstack(t)
+    x = np.hstack(x).astype(float)
+    t = np.hstack(t).astype(float)
     
     return {
         't': t,
         'x': x}
 
-def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9], rowsf_y=[0, 1, 2, 3, 6, 7, 8, 9], n_legs=2):
+def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9], rowsf_y=[0, 1, 2, 3, 6, 7, 8, 9], rowsf_z=[0, 1, 2, 3, 6, 7, 8, 9], n_legs=2):
     """
     Find cost function for time allocation
     @param poly_deg: degree of polynomial
@@ -124,6 +128,8 @@ def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9]
     b_rows_x = []
     A_rows_y = []
     b_rows_y = []
+    A_rows_z = []
+    b_rows_z = []
 
     Q = find_Q(deriv=min_deriv, poly_deg=poly_deg, n_legs=n_legs)
 
@@ -131,6 +137,7 @@ def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9]
     n_l, n_d = sympy. symbols('n_l, n_d', integer=True)  # number of legs and derivatives
     x = sympy.MatrixSymbol('x', n_d, n_l)
     y = sympy.MatrixSymbol('y', n_d, n_l)
+    z = sympy.MatrixSymbol('z', n_d, n_l)
     T = sympy.MatrixSymbol('T', n_l, 1)  # time of leg
     
     # continuity
@@ -165,22 +172,39 @@ def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9]
                 A_rows_y.append(A_row_y)
                 b_rows_y.append(b_row_y)
 
+                # start z
+                A_row_z, b_row_z = find_A(deriv=m, poly_deg=poly_deg, beta=0, n_legs=n_legs, leg=i, value=z[m, i])
+                A_rows_z.append(A_row_z)
+                b_rows_z.append(b_row_z)
+        
+                # stop z
+                A_row_z, b_row_z = find_A(deriv=m, poly_deg=poly_deg, beta=1, n_legs=n_legs, leg=i, value=z[m, i+1])
+                A_rows_z.append(A_row_z)
+                b_rows_z.append(b_row_z)
+
     A_x = sympy.Matrix.vstack(*A_rows_x)
     A_y = sympy.Matrix.vstack(*A_rows_y)
+    A_z = sympy.Matrix.vstack(*A_rows_z)
 
     # Check square matrix for x
     if not A_x.shape[0] == A_x.shape[1]:
         raise ValueError('A_x must be square', A_x.shape)
 
-    # Check square matrix for x
+    # Check square matrix for y
     if not A_y.shape[0] == A_y.shape[1]:
         raise ValueError('A_y must be square', A_y.shape)
+
+    # Check square matrix for z
+    if not A_z.shape[0] == A_z.shape[1]:
+        raise ValueError('A_z must be square', A_z.shape)
     
     b_x = sympy.Matrix.vstack(*b_rows_x)
     b_y = sympy.Matrix.vstack(*b_rows_y)
+    b_z = sympy.Matrix.vstack(*b_rows_z)
 
     I_x = sympy.Matrix.eye(A_x.shape[0])
     I_y = sympy.Matrix.eye(A_y.shape[0])
+    I_z = sympy.Matrix.eye(A_z.shape[0])
     
     # free x constraints
     rowsp_x = list(range(A_x.shape[0]))
@@ -192,6 +216,11 @@ def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9]
     for row in rowsf_y:
         rowsp_y.remove(row)
 
+    # free z constraints
+    rowsp_z = list(range(A_z.shape[0]))
+    for row in rowsf_z:
+        rowsp_z.remove(row)
+
     # compute permutation matrix for x
     rows_x = rowsf_x + rowsp_x
     C_x = sympy.Matrix.vstack(*[I_x[i, :] for i in rows_x])
@@ -199,6 +228,10 @@ def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9]
     # compute permutation matrix for y
     rows_y = rowsf_y + rowsp_y
     C_y = sympy.Matrix.vstack(*[I_y[i, :] for i in rows_y])
+
+    # compute permutation matrix for z
+    rows_z = rowsf_z + rowsp_z
+    C_z = sympy.Matrix.vstack(*[I_z[i, :] for i in rows_z])
 
     # find R_x for x
     A_I_x = A_x.inv()
@@ -209,6 +242,11 @@ def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9]
     A_I_y = A_y.inv()
     R_y = (C_y@A_I_y.T@Q@A_I_y@C_y.T)
     R_y.simplify()
+
+    # find R_z for z
+    A_I_z = A_z.inv()
+    R_z = (C_z@A_I_z.T@Q@A_I_z@C_z.T)
+    R_z.simplify()
 
     # split R_x
     n_f_x = len(rowsf_x) # number fixed
@@ -221,6 +259,12 @@ def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9]
     n_p_y = len(rowsp_y)  # number free
     Rpp_y = R_y[n_f_y:, n_f_y:]
     Rfp_y = R_y[:n_f_y, n_f_y:]
+
+    # split R_z
+    n_f_z = len(rowsf_z) # number fixed
+    n_p_z = len(rowsp_z)  # number free
+    Rpp_z = R_z[n_f_z:, n_f_z:]
+    Rfp_z = R_z[:n_f_z, n_f_z:]
     
     # find fixed parameters for x
     df_x = (C_x@b_x)[:n_f_x, 0]
@@ -228,47 +272,63 @@ def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9]
     # find fixed parameters for y
     df_y = (C_y@b_y)[:n_f_y, 0]
 
+    # find fixed parameters for z
+    df_z = (C_z@b_z)[:n_f_z, 0]
+
     # find free parameters for x
     dp_x = -Rpp_x.inv()@Rfp_x.T@df_x
     
     # find free parameters for y
     dp_y = -Rpp_y.inv()@Rfp_y.T@df_y
 
+    # find free parameters for z
+    dp_z = -Rpp_z.inv()@Rfp_z.T@df_z
+
     # complete parameters vector for x 
     d_x = sympy.Matrix.vstack(df_x, dp_x)
 
     # complete parameters vector for y 
     d_y = sympy.Matrix.vstack(df_y, dp_y)
+
+    # complete parameters vector for z 
+    d_z = sympy.Matrix.vstack(df_z, dp_z)
     
     # find polynomial coefficients for x
     p_x = A_I_x@d_x
 
     # find polynomial coefficients for y
     p_y = A_I_y@d_y
+
+    # find polynomial coefficients for z
+    p_z = A_I_z@d_z
     
     Ti = sympy.symbols('T_0:{:d}'.format(n_legs))
 
     # find optimized cost
     k = sympy.symbols('k')  # time weight
-    J = ((p_x.T@Q@p_x)[0, 0]).simplify() + ((p_y.T@Q@p_y)[0, 0]).simplify() + k*sum(Ti)
+    J = ((p_x.T@Q@p_x)[0, 0]).simplify() + ((p_y.T@Q@p_y)[0, 0]).simplify() + ((p_z.T@Q@p_z)[0, 0]).simplify() + k*sum(Ti)
 
     J = J.subs(T, sympy.Matrix(Ti))
     p_x = p_x.subs(T, sympy.Matrix(Ti))
     p_y = p_y.subs(T, sympy.Matrix(Ti))
+    p_z = p_z.subs(T, sympy.Matrix(Ti))
     
     return {
-        'f_J': sympy.lambdify([Ti, x, y, k], J),
+        'f_J': sympy.lambdify([Ti, x, y, z, k], J),
         'f_p_x': sympy.lambdify([Ti, x, k], list(p_x)),
-        'f_p_y': sympy.lambdify([Ti, y, k], list(p_y))
+        'f_p_y': sympy.lambdify([Ti, y, k], list(p_y)),
+        'f_p_z': sympy.lambdify([Ti, z, k], list(p_z))
     }
 
 
-def run_traj(x1,v_x,y1,v_y,ax,ay,k, plot = False): #input 4x1 matrix
+def run_traj(x1,v_x,y1,v_y,z1,v_z,ax,ay,az,k, plot = True): #input 4x1 matrix 
+#n_legs is changed to k in function
     # calls other functions, optimize and minimize. 
     n_legs = len(x1)-1
     cost = find_cost_function(poly_deg=5, min_deriv=3,
     rowsf_x= list(range(6*n_legs)), 
-    rowsf_y = list(range(6*n_legs)), 
+    rowsf_y = list(range(6*n_legs)),
+    rowsf_z = list(range(6*n_legs)), 
     n_legs=n_legs)
 
     x = sympy.Matrix([  # boundary conditions for x
@@ -279,16 +339,22 @@ def run_traj(x1,v_x,y1,v_y,ax,ay,k, plot = False): #input 4x1 matrix
         y1,v_y,ay
         ])
 
+    z = sympy.Matrix([  # boundary conditions for z
+        z1,v_z,az
+        ])
+
     k_time = 10^20 #weight on time
-    sol = sol = scipy.optimize.minimize(lambda T: cost['f_J'](T, x, y, k_time), [1]*n_legs, bounds=[[0.1, 100]]* n_legs)
+    sol = scipy.optimize.minimize(lambda T: cost['f_J'](T, x, y, z, k_time), [1]*n_legs, bounds=[[0.1, 100]]* n_legs)
 
     T_opt = sol['x']
 
     p_opt_x = cost['f_p_x'](T_opt, x, k_time)
     p_opt_y = cost['f_p_y'](T_opt, y, k_time)
+    p_opt_z = cost['f_p_z'](T_opt, z, k_time)
 
     traj_x = compute_trajectory(p_opt_x, T_opt)
     traj_y = compute_trajectory(p_opt_y, T_opt)
+    traj_z = compute_trajectory(p_opt_z, T_opt)
 
     print("Leg Times: ", T_opt)
     print("Total Time: ", sum(T_opt))
@@ -309,6 +375,14 @@ def run_traj(x1,v_x,y1,v_y,ax,ay,k, plot = False): #input 4x1 matrix
         plt.title('y vs t')
 
         plt.figure()
+        plt.plot(traj_z['t'], traj_z['x'])
+        plt.xlabel('t')
+        plt.ylabel('z')
+        plt.grid(True)
+        plt.title('z vs t')
+
+        # 2D plot (x vs y)
+        plt.figure()
         normalize = colors.Normalize(vmin=min(traj_x['t']), vmax=max(traj_x['t']))
         plt.scatter(traj_x['x'], traj_y['x'], c=traj_x['t'], s=8, cmap='viridis', norm=normalize, marker=(5,2))
         plt.xlabel('x')
@@ -316,5 +390,16 @@ def run_traj(x1,v_x,y1,v_y,ax,ay,k, plot = False): #input 4x1 matrix
         plt.grid(True) 
         plt.title('y vs x path')
 
-    return {'x':traj_x['x'], 'y':traj_y['x'], 't_x':traj_x['t'],'t_y':traj_y['t']}
+        # 3D plot
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        normalize = colors.Normalize(vmin=min(traj_x['t']), vmax=max(traj_x['t']))
+        scatter = ax.scatter(traj_x['x'], traj_y['x'], traj_z['x'], c=traj_x['t'], s=8, cmap='viridis', norm=normalize)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('z')
+        ax.set_title('3D Trajectory')
+        fig.colorbar(scatter, ax=ax, label='Time')
+
+    return {'x':traj_x['x'], 'y':traj_y['x'], 'z':traj_z['x'], 't_x':traj_x['t'],'t_y':traj_y['t'], 't_z':traj_z['t']}
 
