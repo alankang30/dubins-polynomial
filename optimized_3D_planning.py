@@ -1,405 +1,207 @@
 import sympy
 import numpy as np
 import scipy.optimize
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import matplotlib.colors as colors
-from mpl_toolkits.mplot3d import Axes3D
+import scipy.linalg
+
+
+# ─────────────────────────────────────────────
+# Cost matrix Q — minimizes jerk (3rd derivative)
+# ─────────────────────────────────────────────
 
 def find_Q(deriv, poly_deg, n_legs):
-    """
-    Finds the cost matrix Q
-    @param deriv: for cost J, 0=position, 1=velocity, etc.
-    @param poly_deg: degree of polynomial
-    @n_legs: number of legs in trajectory (num. waypoints - 1)
-    @return Q matrix for cost J = p^T Q p
-    """
     k, l, m, n, n_c, n_l = sympy.symbols('k, l, m, n, n_c, n_l', integer=True)
-    # k summation dummy variable
-    # n deg of polynomial
-
-    beta = sympy.symbols('beta')  # scaled time on leg, 0-1
-    c = sympy.MatrixSymbol('c', n_c, 1)  # coefficient matrices, length is n+1, must be variable (n_c)
-    T = sympy.symbols('T')  # time of leg
-    P = sympy.summation(c[k, 0]*sympy.factorial(k)/sympy.factorial(k-m)*beta**(k-m)/T**m, (k, m, n))  # polynomial derivative
+    beta = sympy.symbols('beta')
+    c = sympy.MatrixSymbol('c', n_c, 1)
+    T = sympy.symbols('T')
+    P = sympy.summation(c[k,0]*sympy.factorial(k)/sympy.factorial(k-m)*beta**(k-m)/T**m, (k,m,n))
     P = P.subs({m: deriv, n: poly_deg}).doit()
-    J = sympy.integrate(P**2, (beta, 0, 1)).doit()  # cost
-    p = sympy.Matrix([c[i, 0] for i in range(poly_deg+1)])  # vector of terms
-    Q = sympy.Matrix([J]).jacobian(p).jacobian(p)/2  # find Q using second derivative
-    assert (p.T@Q@p)[0, 0].expand() == J  # assert hessian matches cost
-    
+    J = sympy.integrate(P**2, (beta, 0, 1)).doit()
+    p = sympy.Matrix([c[i,0] for i in range(poly_deg+1)])
+    Q = sympy.Matrix([J]).jacobian(p).jacobian(p)/2
+    assert (p.T@Q@p)[0,0].expand() == J
     Ti = sympy.MatrixSymbol('T', n_l, 1)
-    return sympy.diag(*[
-        Q.subs(T, Ti[i]) for i in range(n_legs) ])
+    return sympy.diag(*[Q.subs(T, Ti[i]) for i in range(n_legs)])
+
 
 def find_A(deriv, poly_deg, beta, n_legs, leg, value):
-    """
-    Finds rows of constraint matrix for setting value of trajectory and its derivatives
-    @param deriv: the derivative that you would like to set, 0=position, 1=vel etc.
-    @param poly_deg: degree of polynomial
-    @param beta: 0=start of leg, 1=end of leg
-    @n_legs: number of legs in trajectory (num. waypoints - 1)
-    @leg: current leg
-    @value: value of deriv at that point
-    @return A_row, b_row
-    """
     k, m, n, n_c, n_l = sympy.symbols('k, m, n, n_c, n_l', integer=True)
-    # k summation dummy variable
-    # n deg of polynomial
-
-    c = sympy.MatrixSymbol('c', n_c, n_l)  # coefficient matrices, length is n+1, must be variable (n_c)
-
-    T = sympy.MatrixSymbol('T', n_l, 1)  # time of leg
-    
-    p = sympy.Matrix([c[i, l] for l in range(n_legs) for i in range(poly_deg+1) ])  # vector of terms
-
-    P = sympy.summation(c[k, leg]*sympy.factorial(k)/sympy.factorial(k-m)*beta**(k-m)/T[leg]**m, (k, m, n))  # polynomial derivative
+    c = sympy.MatrixSymbol('c', n_c, n_l)
+    T = sympy.MatrixSymbol('T', n_l, 1)
+    p = sympy.Matrix([c[i,l] for l in range(n_legs) for i in range(poly_deg+1)])
+    P = sympy.summation(c[k,leg]*sympy.factorial(k)/sympy.factorial(k-m)*beta**(k-m)/T[leg]**m, (k,m,n))
     P = P.subs({m: deriv, n: poly_deg}).doit()
+    return sympy.Matrix([P]).jacobian(p), sympy.Matrix([value])
 
-    A_row = sympy.Matrix([P]).jacobian(p)
-    b_row = sympy.Matrix([value])
-    return A_row, b_row
 
-def find_A_cont(deriv, poly_deg, n_legs, leg):
-    """
-    Finds rows of constraint matrix for continuity
-    @param deriv: the derivative to enforce continuity for
-    @param poly_deg: degree of polynomial
-    @param beta: 0=start of leg, 1=end of leg
-    @n_legs: number of legs in trajectory (num. waypoints - 1)
-    @leg: current leg, enforce continuity between leg and leg + 1
-    @return A_row, b_row
-    """    
-    k, m, n, n_c, n_l = sympy.symbols('k, m, n, n_c, n_l', integer=True)
-    # k summation dummy variable
-    # n deg of polynomial
-
-    c = sympy.MatrixSymbol('c', n_c, n_l)  # coefficient matrices, length is n+1, must be variable (n_c)
-    T = sympy.MatrixSymbol('T', n_l, 1)  # time of leg
-    
-    p = sympy.Matrix([c[i, l] for l in range(n_legs) for i in range(poly_deg+1) ])  # vector of terms
-
-    beta0 = 1
-    beta1 = 0
-    P = sympy.summation(
-        c[k, leg]*sympy.factorial(k)/sympy.factorial(k-m)*beta0**(k-m)/T[leg]**m
-        - c[k, leg + 1]*sympy.factorial(k)/sympy.factorial(k-m)*beta1**(k-m)/T[leg+1]**m, (k, m, n))  # polynomial derivative
-    P = P.subs({m: deriv, n: poly_deg}).doit()
-    A_row = sympy.Matrix([P]).jacobian(p)
-    b_row = sympy.Matrix([0])
-    return A_row, b_row
-
-def compute_trajectory(p, T_opt):
+def compute_trajectory(p, T_opt, n_pts=200):
     p = np.asarray(p, dtype=float).flatten()
     T_opt = np.asarray(T_opt, dtype=float).flatten()
     S = np.hstack([0, np.cumsum(T_opt)])
-    t = []
-    x = []
+    t_all, x_all = [], []
+    n_coeffs = 6
     for i in range(len(T_opt)):
-        beta = np.linspace(0, 1, dtype=float)
-        ti = T_opt[i]*beta + S[i]
-        coeff = np.asarray(np.flip(p[i*6:(i+1)*6]), dtype=float)
-        xi = np.polyval(coeff, beta)
-        t.append(ti)
-        x.append(xi)
-    x = np.hstack(x).astype(float)
-    t = np.hstack(t).astype(float)
-    
-    return {
-        't': t,
-        'x': x}
+        beta = np.linspace(0, 1, n_pts, dtype=float)
+        ti   = T_opt[i]*beta + S[i]
+        coeff = np.asarray(np.flip(p[i*n_coeffs:(i+1)*n_coeffs]), dtype=float)
+        xi   = np.polyval(coeff, beta)
+        t_all.append(ti); x_all.append(xi)
+    return {'t': np.hstack(t_all), 'x': np.hstack(x_all)}
 
-def find_cost_function(poly_deg=5, min_deriv=3, rowsf_x=[0, 1, 2, 3, 6, 7, 8, 9], rowsf_y=[0, 1, 2, 3, 6, 7, 8, 9], rowsf_z=[0, 1, 2, 3, 6, 7, 8, 9], n_legs=2):
+
+def find_cost_function(poly_deg=5, min_deriv=3, n_legs=2):
     """
-    Find cost function for time allocation
-    @param poly_deg: degree of polynomial
-    @param min_deriv: J = integral( min_deriv(t)^2 dt ), 0=pos, 1=vel, etc.
-    @param rowsf: fixed boundary conditions
-        0 pos leg 0 start
-        1 pos leg 0 end
-        2 vel leg 0 start
-        3 vel leg 0 end
-        4 acc leg 0 start
-        5 acc leg 0 end
-        .. repeats for next leg
-    @param n_legs: number of legs
+    Builds the closed-form cost function using the MIT polynomial planning approach.
+    All boundary conditions fixed: position, velocity, acceleration at each waypoint.
+    Returns callable cost and coefficient functions.
     """
-    A_rows_x = []
-    b_rows_x = []
-    A_rows_y = []
-    b_rows_y = []
-    A_rows_z = []
-    b_rows_z = []
+    n_coeffs = poly_deg + 1
+    rowsf = list(range(n_coeffs * n_legs))  # all rows fixed
+
+    A_rows_x, b_rows_x = [], []
+    A_rows_y, b_rows_y = [], []
+    A_rows_z, b_rows_z = [], []
 
     Q = find_Q(deriv=min_deriv, poly_deg=poly_deg, n_legs=n_legs)
 
-    # symbolic boundary conditions
-    n_l, n_d = sympy. symbols('n_l, n_d', integer=True)  # number of legs and derivatives
+    n_l, n_d = sympy.symbols('n_l, n_d', integer=True)
     x = sympy.MatrixSymbol('x', n_d, n_l)
     y = sympy.MatrixSymbol('y', n_d, n_l)
     z = sympy.MatrixSymbol('z', n_d, n_l)
-    T = sympy.MatrixSymbol('T', n_l, 1)  # time of leg
-    
-    # continuity
-    if False:  # enable to enforce continuity
-        for m in range(3):
-            for i in range(n_legs-1):
-                A_row, b_row = find_A_cont(deriv=m, poly_deg=5, n_legs=2, leg0=i, leg1=i+1)
-                A_rows.append(A_row)
-                b_rows.append(b_row)
+    T = sympy.MatrixSymbol('T', n_l, 1)
 
-    # position, vel, accel, beginning and end of leg
-    if True:
-        for i in range(n_legs):
-            for m in range(3):
-                # start x
-                A_row_x, b_row_x = find_A(deriv=m, poly_deg=poly_deg, beta=0, n_legs=n_legs, leg=i, value=x[m, i])
-                A_rows_x.append(A_row_x)
-                b_rows_x.append(b_row_x)
-        
-                # stop x
-                A_row_x, b_row_x = find_A(deriv=m, poly_deg=poly_deg, beta=1, n_legs=n_legs, leg=i, value=x[m, i+1])
-                A_rows_x.append(A_row_x)
-                b_rows_x.append(b_row_x)
+    for i in range(n_legs):
+        for m in range(3):  # pos, vel, acc
+            for dim, rows, brows in [('x', A_rows_x, b_rows_x),
+                                      ('y', A_rows_y, b_rows_y),
+                                      ('z', A_rows_z, b_rows_z)]:
+                sym = x if dim=='x' else (y if dim=='y' else z)
+                Ar, br = find_A(deriv=m, poly_deg=poly_deg, beta=0,
+                                n_legs=n_legs, leg=i, value=sym[m, i])
+                rows.append(Ar); brows.append(br)
+                Ar, br = find_A(deriv=m, poly_deg=poly_deg, beta=1,
+                                n_legs=n_legs, leg=i, value=sym[m, i+1])
+                rows.append(Ar); brows.append(br)
 
-                # start y
-                A_row_y, b_row_y = find_A(deriv=m, poly_deg=poly_deg, beta=0, n_legs=n_legs, leg=i, value=y[m, i])
-                A_rows_y.append(A_row_y)
-                b_rows_y.append(b_row_y)
-        
-                # stop y
-                A_row_y, b_row_y = find_A(deriv=m, poly_deg=poly_deg, beta=1, n_legs=n_legs, leg=i, value=y[m, i+1])
-                A_rows_y.append(A_row_y)
-                b_rows_y.append(b_row_y)
+    def build(A_rows, b_rows):
+        A = sympy.Matrix.vstack(*A_rows)
+        b = sympy.Matrix.vstack(*b_rows)
+        if A.shape[0] != A.shape[1]:
+            raise ValueError(f'A not square: {A.shape}')
+        I  = sympy.Matrix.eye(A.shape[0])
+        rowsp = []  # no free rows — all fixed
+        C  = sympy.Matrix.vstack(*[I[i,:] for i in rowsf + rowsp])
+        Ai = A.inv()
+        R  = (C @ Ai.T @ Q @ Ai @ C.T); R.simplify()
+        n_f = len(rowsf)
+        df  = (C @ b)[:n_f, 0]
+        p_c = Ai @ df
+        return p_c, df
 
-                # start z
-                A_row_z, b_row_z = find_A(deriv=m, poly_deg=poly_deg, beta=0, n_legs=n_legs, leg=i, value=z[m, i])
-                A_rows_z.append(A_row_z)
-                b_rows_z.append(b_row_z)
-        
-                # stop z
-                A_row_z, b_row_z = find_A(deriv=m, poly_deg=poly_deg, beta=1, n_legs=n_legs, leg=i, value=z[m, i+1])
-                A_rows_z.append(A_row_z)
-                b_rows_z.append(b_row_z)
+    p_x, _ = build(A_rows_x, b_rows_x)
+    p_y, _ = build(A_rows_y, b_rows_y)
+    p_z, _ = build(A_rows_z, b_rows_z)
 
-    A_x = sympy.Matrix.vstack(*A_rows_x)
-    A_y = sympy.Matrix.vstack(*A_rows_y)
-    A_z = sympy.Matrix.vstack(*A_rows_z)
-
-    # Check square matrix for x
-    if not A_x.shape[0] == A_x.shape[1]:
-        raise ValueError('A_x must be square', A_x.shape)
-
-    # Check square matrix for y
-    if not A_y.shape[0] == A_y.shape[1]:
-        raise ValueError('A_y must be square', A_y.shape)
-
-    # Check square matrix for z
-    if not A_z.shape[0] == A_z.shape[1]:
-        raise ValueError('A_z must be square', A_z.shape)
-    
-    b_x = sympy.Matrix.vstack(*b_rows_x)
-    b_y = sympy.Matrix.vstack(*b_rows_y)
-    b_z = sympy.Matrix.vstack(*b_rows_z)
-
-    I_x = sympy.Matrix.eye(A_x.shape[0])
-    I_y = sympy.Matrix.eye(A_y.shape[0])
-    I_z = sympy.Matrix.eye(A_z.shape[0])
-    
-    # free x constraints
-    rowsp_x = list(range(A_x.shape[0]))
-    for row in rowsf_x:
-        rowsp_x.remove(row)
-
-    # free y constraints
-    rowsp_y = list(range(A_y.shape[0]))
-    for row in rowsf_y:
-        rowsp_y.remove(row)
-
-    # free z constraints
-    rowsp_z = list(range(A_z.shape[0]))
-    for row in rowsf_z:
-        rowsp_z.remove(row)
-
-    # compute permutation matrix for x
-    rows_x = rowsf_x + rowsp_x
-    C_x = sympy.Matrix.vstack(*[I_x[i, :] for i in rows_x])
-
-    # compute permutation matrix for y
-    rows_y = rowsf_y + rowsp_y
-    C_y = sympy.Matrix.vstack(*[I_y[i, :] for i in rows_y])
-
-    # compute permutation matrix for z
-    rows_z = rowsf_z + rowsp_z
-    C_z = sympy.Matrix.vstack(*[I_z[i, :] for i in rows_z])
-
-    # find R_x for x
-    A_I_x = A_x.inv()
-    R_x = (C_x@A_I_x.T@Q@A_I_x@C_x.T)
-    R_x.simplify()
-
-    # find R_y for y
-    A_I_y = A_y.inv()
-    R_y = (C_y@A_I_y.T@Q@A_I_y@C_y.T)
-    R_y.simplify()
-
-    # find R_z for z
-    A_I_z = A_z.inv()
-    R_z = (C_z@A_I_z.T@Q@A_I_z@C_z.T)
-    R_z.simplify()
-
-    # split R_x
-    n_f_x = len(rowsf_x) # number fixed
-    n_p_x = len(rowsp_x)  # number free
-    Rpp_x = R_x[n_f_x:, n_f_x:]
-    Rfp_x = R_x[:n_f_x, n_f_x:]
-
-    # split R_y
-    n_f_y = len(rowsf_y) # number fixed
-    n_p_y = len(rowsp_y)  # number free
-    Rpp_y = R_y[n_f_y:, n_f_y:]
-    Rfp_y = R_y[:n_f_y, n_f_y:]
-
-    # split R_z
-    n_f_z = len(rowsf_z) # number fixed
-    n_p_z = len(rowsp_z)  # number free
-    Rpp_z = R_z[n_f_z:, n_f_z:]
-    Rfp_z = R_z[:n_f_z, n_f_z:]
-    
-    # find fixed parameters for x
-    df_x = (C_x@b_x)[:n_f_x, 0]
-
-    # find fixed parameters for y
-    df_y = (C_y@b_y)[:n_f_y, 0]
-
-    # find fixed parameters for z
-    df_z = (C_z@b_z)[:n_f_z, 0]
-
-    # find free parameters for x
-    dp_x = -Rpp_x.inv()@Rfp_x.T@df_x
-    
-    # find free parameters for y
-    dp_y = -Rpp_y.inv()@Rfp_y.T@df_y
-
-    # find free parameters for z
-    dp_z = -Rpp_z.inv()@Rfp_z.T@df_z
-
-    # complete parameters vector for x 
-    d_x = sympy.Matrix.vstack(df_x, dp_x)
-
-    # complete parameters vector for y 
-    d_y = sympy.Matrix.vstack(df_y, dp_y)
-
-    # complete parameters vector for z 
-    d_z = sympy.Matrix.vstack(df_z, dp_z)
-    
-    # find polynomial coefficients for x
-    p_x = A_I_x@d_x
-
-    # find polynomial coefficients for y
-    p_y = A_I_y@d_y
-
-    # find polynomial coefficients for z
-    p_z = A_I_z@d_z
-    
     Ti = sympy.symbols('T_0:{:d}'.format(n_legs))
+    k  = sympy.symbols('k')
 
-    # find optimized cost
-    k = sympy.symbols('k')  # time weight
-    J = ((p_x.T@Q@p_x)[0, 0]).simplify() + ((p_y.T@Q@p_y)[0, 0]).simplify() + ((p_z.T@Q@p_z)[0, 0]).simplify() + k*sum(Ti)
+    for sym_list in [p_x, p_y, p_z]:
+        sym_list = sym_list.subs(T, sympy.Matrix(Ti))
 
-    J = J.subs(T, sympy.Matrix(Ti))
     p_x = p_x.subs(T, sympy.Matrix(Ti))
     p_y = p_y.subs(T, sympy.Matrix(Ti))
     p_z = p_z.subs(T, sympy.Matrix(Ti))
-    
+    Q2  = Q.subs(T, sympy.Matrix(Ti))
+
+    J = ((p_x.T@Q2@p_x)[0,0]).simplify() + \
+        ((p_y.T@Q2@p_y)[0,0]).simplify() + \
+        ((p_z.T@Q2@p_z)[0,0]).simplify() + k*sum(Ti)
+
     return {
-        'f_J': sympy.lambdify([Ti, x, y, z, k], J),
+        'f_J':   sympy.lambdify([Ti, x, y, z, k], J),
         'f_p_x': sympy.lambdify([Ti, x, k], list(p_x)),
         'f_p_y': sympy.lambdify([Ti, y, k], list(p_y)),
-        'f_p_z': sympy.lambdify([Ti, z, k], list(p_z))
+        'f_p_z': sympy.lambdify([Ti, z, k], list(p_z)),
     }
 
 
-def run_traj(x1,v_x,y1,v_y,z1,v_z,ax,ay,az,k, plot = True): #input 4x1 matrix 
-#n_legs is changed to k in function
-    # calls other functions, optimize and minimize. 
-    n_legs = len(x1)-1
-    cost = find_cost_function(poly_deg=5, min_deriv=3,
-    rowsf_x= list(range(6*n_legs)), 
-    rowsf_y = list(range(6*n_legs)),
-    rowsf_z = list(range(6*n_legs)), 
-    n_legs=n_legs)
+# ─────────────────────────────────────────────
+# Main trajectory solver
+# ─────────────────────────────────────────────
 
-    x = sympy.Matrix([  # boundary conditions for x
-        x1,v_x,ax
-        ])
+def run_traj(x1, y1, z1, headings, k_time=15.0, v_min=1.0, v_max=15.0):
+    """
+    Minimum-jerk polynomial trajectory.
 
-    y = sympy.Matrix([  # boundary conditions for y
-        y1,v_y,ay
-        ])
+    @param x1, y1, z1  : waypoint positions (lists)
+    @param headings     : heading at each waypoint (radians)
+    @param k_time       : time penalty weight — lower = smoother/slower
+    @param v_min, v_max : desired speed range — used to set waypoint velocities
+    @return             : dict with x, y, z, t_x arrays
+    """
+    n_waypoints = len(x1)
+    n_legs      = n_waypoints - 1
 
-    z = sympy.Matrix([  # boundary conditions for z
-        z1,v_z,az
-        ])
+    x1       = np.array(x1,       dtype=float)
+    y1       = np.array(y1,       dtype=float)
+    z1       = np.array(z1,       dtype=float)
+    headings = np.array(headings, dtype=float)
 
-    k_time = 10^20 #weight on time
-    sol = scipy.optimize.minimize(lambda T: cost['f_J'](T, x, y, z, k_time), [1]*n_legs, bounds=[[0.1, 100]]* n_legs)
+    # set waypoint speed as midpoint of desired range
+    v_wp = (v_min + v_max) / 2.0
+    vx   = v_wp * np.cos(headings)
+    vy   = v_wp * np.sin(headings)
+    vz   = np.zeros(n_waypoints)
+    ax   = np.zeros(n_waypoints)
+    ay   = np.zeros(n_waypoints)
+    az   = np.zeros(n_waypoints)
 
-    T_opt = sol['x']
+    cost = find_cost_function(poly_deg=5, min_deriv=3, n_legs=n_legs)
 
-    p_opt_x = cost['f_p_x'](T_opt, x, k_time)
-    p_opt_y = cost['f_p_y'](T_opt, y, k_time)
-    p_opt_z = cost['f_p_z'](T_opt, z, k_time)
+    xm = sympy.Matrix([list(x1), list(vx), list(ax)])
+    ym = sympy.Matrix([list(y1), list(vy), list(ay)])
+    zm = sympy.Matrix([list(z1), list(vz), list(az)])
 
-    traj_x = compute_trajectory(p_opt_x, T_opt)
-    traj_y = compute_trajectory(p_opt_y, T_opt)
-    traj_z = compute_trajectory(p_opt_z, T_opt)
+    # initial leg time guess from distance / v_wp
+    dists = np.sqrt(np.diff(x1)**2 + np.diff(y1)**2 + np.diff(z1)**2)
+    T0    = np.maximum(dists / v_wp, 0.5)
 
-    print("Leg Times: ", T_opt)
-    print("Total Time: ", sum(T_opt))
+    sol = scipy.optimize.minimize(
+        lambda T: cost['f_J'](T, xm, ym, zm, k_time),
+        T0,
+        method='L-BFGS-B',
+        bounds=[(0.1, 100.0)] * n_legs,
+        options={'maxiter': 500, 'ftol': 1e-9}
+    )
 
-    if plot:
-        plt.figure()
-        plt.plot(traj_x['t'], traj_x['x'])
-        plt.xlabel('t')
-        plt.ylabel('x')
-        plt.grid(True)
-        plt.title('x vs t')
+    T_opt  = sol.x
+    p_optx = cost['f_p_x'](T_opt, xm, k_time)
+    p_opty = cost['f_p_y'](T_opt, ym, k_time)
+    p_optz = cost['f_p_z'](T_opt, zm, k_time)
 
-        plt.figure()
-        plt.plot(traj_y['t'], traj_y['x'])
-        plt.xlabel('t')
-        plt.ylabel('y')
-        plt.grid(True)
-        plt.title('y vs t')
+    traj_x = compute_trajectory(p_optx, T_opt)
+    traj_y = compute_trajectory(p_opty, T_opt)
+    traj_z = compute_trajectory(p_optz, T_opt)
 
-        plt.figure()
-        plt.plot(traj_z['t'], traj_z['x'])
-        plt.xlabel('t')
-        plt.ylabel('z')
-        plt.grid(True)
-        plt.title('z vs t')
+    # speed report
+    t  = traj_x['t']
+    dt = np.diff(t)
+    vx_t = np.diff(traj_x['x']) / dt
+    vy_t = np.diff(traj_y['x']) / dt
+    spd  = np.sqrt(vx_t**2 + vy_t**2)
+    print("-" * 45)
+    print(f"REPORT")
+    print(f"Observed Speed Range: {spd.min():.2f} to {spd.max():.2f} m/s")
+    print(f"Target Window:        {v_min} to {v_max} m/s")
+    print(f"Leg Times: {np.round(T_opt, 2)}")
+    print(f"Total Time: {sum(T_opt):.2f} s")
+    print("-" * 45)
 
-        # 2D plot (x vs y)
-        plt.figure()
-        normalize = colors.Normalize(vmin=min(traj_x['t']), vmax=max(traj_x['t']))
-        plt.scatter(traj_x['x'], traj_y['x'], c=traj_x['t'], s=8, cmap='viridis', norm=normalize, marker=(5,2))
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.grid(True) 
-        plt.title('y vs x path')
-
-        # 3D plot
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        normalize = colors.Normalize(vmin=min(traj_x['t']), vmax=max(traj_x['t']))
-        scatter = ax.scatter(traj_x['x'], traj_y['x'], traj_z['x'], c=traj_x['t'], s=8, cmap='viridis', norm=normalize)
-        ax.set_xlabel('x')
-        ax.set_ylabel('y')
-        ax.set_zlabel('z')
-        ax.set_title('3D Trajectory')
-        fig.colorbar(scatter, ax=ax, label='Time')
-
-    return {'x':traj_x['x'], 'y':traj_y['x'], 'z':traj_z['x'], 't_x':traj_x['t'],'t_y':traj_y['t'], 't_z':traj_z['t']}
-
+    return {
+        'x':   traj_x['x'],
+        'y':   traj_y['x'],
+        'z':   traj_z['x'],
+        't_x': traj_x['t'],
+        't_y': traj_y['t'],
+        't_z': traj_z['t'],
+        'T_legs': T_opt
+    }
